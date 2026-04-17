@@ -22,8 +22,18 @@ Servux-paper is a lightweight Paper / Lophine plugin that adds partial Servux co
 
 - Paper / Lophine `1.21.11`
 - Java `21`
-- ProtocolLib `5.4.0`
 - Fabric client with MaLiLib and Litematica
+
+## Dependencies
+
+Server-side required plugin:
+
+- ProtocolLib `5.4.0`
+
+Client-side required mods:
+
+- MaLiLib
+- Litematica
 
 ## Install
 
