@@ -60,7 +60,7 @@ easyPlaceProtocolVersion = Auto or Version 3
 The jar is generated in:
 
 ```text
-build/libs/Servux-paper-0.1.1.jar
+build/libs/Servux-paper-0.1.0.jar
 ```
 
 ## License
