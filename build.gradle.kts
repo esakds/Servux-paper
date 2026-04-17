@@ -1,0 +1,32 @@
+plugins {
+    java
+}
+
+group = "com.codexmc"
+version = "0.1.1"
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+
+dependencies {
+    compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
+    compileOnly("net.dmulloy2:ProtocolLib:5.4.0")
+    compileOnly("io.netty:netty-buffer:4.1.118.Final")
+}
+
+tasks {
+    compileJava {
+        options.encoding = "UTF-8"
+        options.release.set(21)
+    }
+
+    processResources {
+        filteringCharset = "UTF-8"
+        filesMatching(listOf("paper-plugin.yml", "plugin.yml")) {
+            expand("version" to project.version)
+        }
+    }
+}

@@ -1,0 +1,32 @@
+debug: false
+
+# Leave empty to enable in every world. Add exact world names to restrict it.
+enabled-worlds: []
+
+# Expose the servux:litematics channel and reply to Litematica metadata requests.
+metadata-enabled: true
+
+# Send a metadata packet shortly after join so Litematica AUTO mode can detect Servux.
+join-metadata-delay-ticks: 40
+
+# Enable Litematica Easy Place protocol v3 decoding.
+easy-place-v3-enabled: true
+
+# Keep encoded placement packets alive only briefly.
+packet-max-age-millis: 1200
+
+# Reject obviously invalid encoded placement values.
+max-protocol-value: 1048575
+
+# Only apply decoded state if the Bukkit placed block matches the packet's expected block
+# or the clicked target block. Litematica/Servux v3 may target the replaceable block itself.
+strict-placement-match: true
+
+# Wait until other BlockPlaceEvent listeners have run before correcting block data.
+apply-delay-ticks: 1
+
+# Skip correction if another plugin changed the block type before delayed apply runs.
+require-same-material-before-apply: true
+
+# Set false if you only want Servux detection metadata and no v3 block-state correction.
+apply-block-state: true

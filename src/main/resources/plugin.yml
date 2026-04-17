@@ -1,0 +1,7 @@
+name: Servux-paper
+version: ${version}
+main: com.codexmc.servuxcompat.PaperServuxCompatPlugin
+description: Servux litematics compatibility layer for Litematica Easy Place v3 on Paper.
+api-version: "1.21"
+depend:
+  - ProtocolLib
