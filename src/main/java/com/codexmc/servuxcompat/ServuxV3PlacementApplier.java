@@ -14,6 +14,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 final class ServuxV3PlacementApplier {
@@ -46,7 +47,15 @@ final class ServuxV3PlacementApplier {
             "down", "up", "north", "south", "west", "east"
     );
 
+    private static final ConcurrentHashMap<String, List<PropertyDefinition>> PROPERTY_DEFINITION_CACHE =
+            new ConcurrentHashMap<>();
+    private static final Set<String> PROPERTY_DEFINITION_FAILURES = ConcurrentHashMap.newKeySet();
+
     private ServuxV3PlacementApplier() {
+    }
+
+    static int cacheSize() {
+        return PROPERTY_DEFINITION_CACHE.size();
     }
 
     static boolean apply(Block block, int protocolValue, Logger logger, boolean debug) {
@@ -56,8 +65,7 @@ final class ServuxV3PlacementApplier {
             return false;
         }
 
-        Optional<List<PropertyInfo>> reflectedProperties = readRuntimeProperties(currentData, logger, debug);
-        List<PropertyInfo> properties = reflectedProperties.orElseGet(() -> fallbackProperties(parsed));
+        List<PropertyInfo> properties = resolveProperties(currentData, parsed, logger, debug);
         if (properties.isEmpty()) {
             return false;
         }
@@ -125,6 +133,39 @@ final class ServuxV3PlacementApplier {
         }
     }
 
+    private static List<PropertyInfo> resolveProperties(BlockData blockData,
+                                                        ParsedBlockData parsed,
+                                                        Logger logger,
+                                                        boolean debug) {
+        String cacheKey = parsed.id();
+        List<PropertyDefinition> definitions = PROPERTY_DEFINITION_CACHE.get(cacheKey);
+
+        if (definitions == null && !PROPERTY_DEFINITION_FAILURES.contains(cacheKey)) {
+            Optional<List<PropertyDefinition>> reflected = readRuntimePropertyDefinitions(blockData, logger, debug);
+            if (reflected.isPresent()) {
+                List<PropertyDefinition> existing = PROPERTY_DEFINITION_CACHE.putIfAbsent(cacheKey, reflected.get());
+                definitions = existing != null ? existing : reflected.get();
+            } else {
+                PROPERTY_DEFINITION_FAILURES.add(cacheKey);
+            }
+        }
+
+        if (definitions == null) {
+            return fallbackProperties(parsed);
+        }
+
+        List<PropertyInfo> properties = new ArrayList<>(definitions.size());
+        for (PropertyDefinition definition : definitions) {
+            String currentValue = parsed.properties().get(definition.name());
+            if (currentValue == null && !definition.possibleValues().isEmpty()) {
+                currentValue = definition.possibleValues().get(0);
+            }
+            properties.add(new PropertyInfo(definition.name(), currentValue,
+                    definition.possibleValues(), definition.isDirection()));
+        }
+        return properties;
+    }
+
     private static PropertyInfo firstDirectionProperty(List<PropertyInfo> properties) {
         for (PropertyInfo property : properties) {
             if (property.isDirection() && !"vertical_direction".equals(property.name())) {
@@ -168,7 +209,9 @@ final class ServuxV3PlacementApplier {
         return bits;
     }
 
-    private static Optional<List<PropertyInfo>> readRuntimeProperties(BlockData blockData, Logger logger, boolean debug) {
+    private static Optional<List<PropertyDefinition>> readRuntimePropertyDefinitions(BlockData blockData,
+                                                                                   Logger logger,
+                                                                                   boolean debug) {
         try {
             Object state = invokeNoArg(blockData, "getState");
             if (state == null) {
@@ -180,13 +223,11 @@ final class ServuxV3PlacementApplier {
                 return Optional.empty();
             }
 
-            List<PropertyInfo> properties = new ArrayList<>();
+            List<PropertyDefinition> properties = new ArrayList<>();
             for (Object property : propertyCollection) {
                 String name = String.valueOf(invokeNoArg(property, "getName"));
                 Object valueClass = invokeNoArg(property, "getValueClass");
                 String valueClassName = valueClass instanceof Class<?> clazz ? clazz.getName() : "";
-                Object currentValue = invokeOneArg(state, "getValue", property);
-                String currentValueName = propertyValueName(property, currentValue);
                 Object rawValues = invokeNoArg(property, "getPossibleValues");
                 if (!(rawValues instanceof Collection<?> valuesCollection)) {
                     continue;
@@ -200,11 +241,11 @@ final class ServuxV3PlacementApplier {
                     valueNames.add(propertyValueName(property, value));
                 }
 
-                properties.add(new PropertyInfo(name, currentValueName, valueNames,
+                properties.add(new PropertyDefinition(name, List.copyOf(valueNames),
                         valueClassName.endsWith(".Direction")));
             }
 
-            return Optional.of(properties);
+            return Optional.of(List.copyOf(properties));
         } catch (ReflectiveOperationException | RuntimeException ex) {
             debug(logger, debug, "Falling back to Bukkit block-data parser: " + ex.getMessage());
             return Optional.empty();
@@ -313,6 +354,9 @@ final class ServuxV3PlacementApplier {
     }
 
     private record PropertyInfo(String name, String currentValue, List<String> possibleValues, boolean isDirection) {
+    }
+
+    private record PropertyDefinition(String name, List<String> possibleValues, boolean isDirection) {
     }
 
     private record ParsedBlockData(String id, LinkedHashMap<String, String> properties) {

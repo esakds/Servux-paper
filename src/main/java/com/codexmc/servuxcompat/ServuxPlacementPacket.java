@@ -4,7 +4,6 @@ import com.comphenix.protocol.wrappers.BlockPosition;
 import com.comphenix.protocol.wrappers.EnumWrappers;
 import org.bukkit.block.Block;
 
-import java.time.Instant;
 import java.util.UUID;
 
 final class ServuxPlacementPacket {
@@ -13,7 +12,7 @@ final class ServuxPlacementPacket {
     private final BlockPosition expectedPlacedBlock;
     private final EnumWrappers.Direction clickedFace;
     private final int protocolValue;
-    private final Instant createdAt;
+    private final long createdAtMillis;
 
     ServuxPlacementPacket(UUID worldId, BlockPosition clickedBlock, BlockPosition expectedPlacedBlock,
                           EnumWrappers.Direction clickedFace, int protocolValue) {
@@ -22,7 +21,7 @@ final class ServuxPlacementPacket {
         this.expectedPlacedBlock = expectedPlacedBlock;
         this.clickedFace = clickedFace;
         this.protocolValue = protocolValue;
-        this.createdAt = Instant.now();
+        this.createdAtMillis = System.currentTimeMillis();
     }
 
     BlockPosition clickedBlock() {
@@ -38,7 +37,11 @@ final class ServuxPlacementPacket {
     }
 
     boolean isOlderThanMillis(long maxAgeMillis) {
-        return createdAt.plusMillis(maxAgeMillis).isBefore(Instant.now());
+        return isOlderThanMillis(System.currentTimeMillis(), maxAgeMillis);
+    }
+
+    boolean isOlderThanMillis(long nowMillis, long maxAgeMillis) {
+        return nowMillis - createdAtMillis > maxAgeMillis;
     }
 
     boolean matchesPlacedBlock(Block block) {

@@ -7,16 +7,13 @@ import com.comphenix.protocol.wrappers.nbt.NbtFactory;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 
 final class ServuxLitematicsPayload {
     static final String CHANNEL = "servux:litematics";
     static final int PACKET_S2C_METADATA = 1;
     static final int PACKET_C2S_METADATA_REQUEST = 2;
-    static final int PACKET_C2S_BLOCK_ENTITY_REQUEST = 3;
-    static final int PACKET_C2S_ENTITY_REQUEST = 4;
-    static final int PACKET_C2S_BULK_ENTITY_NBT_REQUEST = 7;
-    static final int PACKET_C2S_NBT_RESPONSE_DATA = 13;
 
     private ServuxLitematicsPayload() {
     }
@@ -37,14 +34,24 @@ final class ServuxLitematicsPayload {
         return rawData.toByteArray();
     }
 
+    static IncomingPacket readPacket(byte[] payload) {
+        VarInt packetType = readVarInt(payload, 0);
+        return new IncomingPacket(packetType.value(), Arrays.copyOfRange(payload, packetType.nextOffset(), payload.length));
+    }
+
     static int readPacketType(byte[] payload) {
+        return readVarInt(payload, 0).value();
+    }
+
+    static VarInt readVarInt(byte[] payload, int offset) {
         int value = 0;
         int shift = 0;
 
-        for (byte next : payload) {
+        for (int index = offset; index < payload.length; index++) {
+            byte next = payload[index];
             value |= (next & 0x7F) << shift;
             if ((next & 0x80) == 0) {
-                return value;
+                return new VarInt(value, index + 1);
             }
 
             shift += 7;
@@ -54,5 +61,11 @@ final class ServuxLitematicsPayload {
         }
 
         throw new IllegalArgumentException("Missing VarInt terminator");
+    }
+
+    record IncomingPacket(int type, byte[] body) {
+    }
+
+    record VarInt(int value, int nextOffset) {
     }
 }

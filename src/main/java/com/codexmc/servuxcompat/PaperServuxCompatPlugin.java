@@ -12,6 +12,8 @@ import com.comphenix.protocol.wrappers.EnumWrappers;
 import com.comphenix.protocol.wrappers.MovingObjectPositionBlock;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -24,65 +26,74 @@ import org.bukkit.plugin.messaging.PluginMessageListener;
 import org.bukkit.util.Vector;
 
 import java.io.IOException;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 
 public final class PaperServuxCompatPlugin extends JavaPlugin implements Listener, PluginMessageListener {
     private final ConcurrentHashMap<UUID, ServuxPlacementPacket> pendingPlacements = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, Long> lastPlainPacketLog = new ConcurrentHashMap<>();
-    private final AtomicLong metadataRequests = new AtomicLong();
-    private final AtomicLong metadataSent = new AtomicLong();
-    private final AtomicLong useItemOnPackets = new AtomicLong();
-    private final AtomicLong encodedPackets = new AtomicLong();
-    private final AtomicLong blockPlaceEvents = new AtomicLong();
-    private final AtomicLong appliedPlacements = new AtomicLong();
+    private final LongAdder metadataRequests = new LongAdder();
+    private final LongAdder metadataSent = new LongAdder();
+    private final LongAdder useItemOnPackets = new LongAdder();
+    private final LongAdder encodedPackets = new LongAdder();
+    private final LongAdder blockPlaceEvents = new LongAdder();
+    private final LongAdder appliedPlacements = new LongAdder();
+    private final LongAdder expiredPlacements = new LongAdder();
 
     private ProtocolManager protocolManager;
-    private boolean debug;
-    private Set<String> enabledWorlds;
-    private boolean metadataEnabled;
-    private int joinMetadataDelayTicks;
-    private boolean easyPlaceV3Enabled;
-    private long packetMaxAgeMillis;
-    private int maxProtocolValue;
-    private boolean strictPlacementMatch;
-    private long applyDelayTicks;
-    private boolean requireSameMaterialBeforeApply;
-    private boolean applyBlockState;
+    private ScheduledExecutorService maintenanceExecutor;
+    private volatile boolean debug;
+    private volatile Set<String> enabledWorlds = Set.of();
+    private volatile boolean metadataEnabled;
+    private volatile int joinMetadataDelayTicks;
+    private volatile int joinMetadataResendCount;
+    private volatile int joinMetadataResendIntervalTicks;
+    private volatile boolean easyPlaceV3Enabled;
+    private volatile ListenerPriority packetListenerPriority = ListenerPriority.LOWEST;
+    private volatile long packetMaxAgeMillis;
+    private volatile int maxProtocolValue;
+    private volatile boolean strictPlacementMatch;
+    private volatile long applyDelayTicks;
+    private volatile boolean requireSameMaterialBeforeApply;
+    private volatile boolean applyBlockState;
+    private volatile boolean asyncMaintenanceEnabled;
+    private volatile long asyncMaintenanceIntervalMillis;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         reloadLocalConfig();
+        restartMaintenanceExecutor();
 
         getServer().getMessenger().registerOutgoingPluginChannel(this, ServuxLitematicsPayload.CHANNEL);
         getServer().getMessenger().registerIncomingPluginChannel(this, ServuxLitematicsPayload.CHANNEL, this);
 
         protocolManager = ProtocolLibrary.getProtocolManager();
-        protocolManager.addPacketListener(new PacketAdapter(this, ListenerPriority.LOWEST,
-                PacketType.Play.Client.USE_ITEM_ON) {
-            @Override
-            public void onPacketReceiving(PacketEvent event) {
-                handleUseItemOn(event);
-            }
-        });
+        registerPacketListener();
 
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("PaperServuxCompat enabled for servux:litematics metadata and Litematica Easy Place v3.");
+        getLogger().info("PaperServuxCompat enabled for servux:litematics metadata and Easy Place v3.");
     }
 
     @Override
     public void onDisable() {
+        stopMaintenanceExecutor();
         pendingPlacements.clear();
         lastPlainPacketLog.clear();
-        getLogger().info("Stats: metadata_requests=" + metadataRequests.get()
-                + ", metadata_sent=" + metadataSent.get()
-                + ", use_item_on=" + useItemOnPackets.get()
-                + ", encoded_v3=" + encodedPackets.get()
-                + ", block_place=" + blockPlaceEvents.get()
-                + ", applied=" + appliedPlacements.get());
+        getLogger().info("Stats: metadata_requests=" + metadataRequests.sum()
+                + ", metadata_sent=" + metadataSent.sum()
+                + ", use_item_on=" + useItemOnPackets.sum()
+                + ", encoded_v3=" + encodedPackets.sum()
+                + ", block_place=" + blockPlaceEvents.sum()
+                + ", applied=" + appliedPlacements.sum()
+                + ", expired=" + expiredPlacements.sum());
 
         if (protocolManager != null) {
             protocolManager.removePacketListeners(this);
@@ -92,18 +103,128 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
         getServer().getMessenger().unregisterOutgoingPluginChannel(this, ServuxLitematicsPayload.CHANNEL);
     }
 
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!command.getName().equalsIgnoreCase("servuxpaper")) {
+            return false;
+        }
+
+        String action = args.length == 0 ? "status" : args[0].toLowerCase(Locale.ROOT);
+        switch (action) {
+            case "status" -> sendStatus(sender);
+            case "resend" -> resendMetadata(sender, args);
+            case "reload" -> {
+                reloadConfig();
+                reloadLocalConfig();
+                registerPacketListener();
+                restartMaintenanceExecutor();
+                sender.sendMessage("[Servux-paper] Config reloaded.");
+            }
+            default -> sender.sendMessage("[Servux-paper] Usage: /" + label + " <status|resend|reload>");
+        }
+
+        return true;
+    }
+
     private void reloadLocalConfig() {
         debug = getConfig().getBoolean("debug", false);
         enabledWorlds = Set.copyOf(getConfig().getStringList("enabled-worlds"));
         metadataEnabled = getConfig().getBoolean("metadata-enabled", true);
         joinMetadataDelayTicks = Math.max(1, getConfig().getInt("join-metadata-delay-ticks", 40));
+        joinMetadataResendCount = Math.max(1, getConfig().getInt("join-metadata-resend-count", 4));
+        joinMetadataResendIntervalTicks = Math.max(1, getConfig().getInt("join-metadata-resend-interval-ticks", 40));
         easyPlaceV3Enabled = getConfig().getBoolean("easy-place-v3-enabled", true);
+        packetListenerPriority = parsePacketListenerPriority(
+                getConfig().getString("packet-listener-priority", "LOWEST"));
         packetMaxAgeMillis = Math.max(100L, getConfig().getLong("packet-max-age-millis", 1_200L));
         maxProtocolValue = Math.max(15, getConfig().getInt("max-protocol-value", 1_048_575));
         strictPlacementMatch = getConfig().getBoolean("strict-placement-match", true);
         applyDelayTicks = Math.max(0L, getConfig().getLong("apply-delay-ticks", 1L));
         requireSameMaterialBeforeApply = getConfig().getBoolean("require-same-material-before-apply", true);
         applyBlockState = getConfig().getBoolean("apply-block-state", true);
+        asyncMaintenanceEnabled = getConfig().getBoolean("async-maintenance-enabled", true);
+        asyncMaintenanceIntervalMillis = Math.max(250L,
+                getConfig().getLong("async-maintenance-interval-millis", 1_000L));
+    }
+
+    private void sendStatus(CommandSender sender) {
+        sender.sendMessage("[Servux-paper] Version: " + getDescription().getVersion());
+        sender.sendMessage("[Servux-paper] Metadata: enabled=" + metadataEnabled
+                + ", sent=" + metadataSent.sum()
+                + ", requests=" + metadataRequests.sum()
+                + ", joinResends=" + joinMetadataResendCount);
+        sender.sendMessage("[Servux-paper] Easy Place v3: enabled=" + easyPlaceV3Enabled
+                + ", packetPriority=" + packetListenerPriority
+                + ", use_item_on=" + useItemOnPackets.sum()
+                + ", encoded_v3=" + encodedPackets.sum()
+                + ", block_place=" + blockPlaceEvents.sum()
+                + ", applied=" + appliedPlacements.sum());
+        sender.sendMessage("[Servux-paper] Async maintenance: enabled=" + asyncMaintenanceEnabled
+                + ", pending=" + pendingPlacements.size()
+                + ", expired=" + expiredPlacements.sum()
+                + ", blockDataCache=" + ServuxV3PlacementApplier.cacheSize());
+
+        if (sender instanceof Player player) {
+            sender.sendMessage("[Servux-paper] Current world enabled=" + isEnabledFor(player)
+                    + ". Use /servuxpaper resend to resend Servux metadata to yourself.");
+        }
+    }
+
+    private void resendMetadata(CommandSender sender, String[] args) {
+        if (!metadataEnabled) {
+            sender.sendMessage("[Servux-paper] Metadata is disabled in config.yml.");
+            return;
+        }
+
+        Player target;
+        if (args.length >= 2) {
+            target = getServer().getPlayerExact(args[1]);
+            if (target == null) {
+                sender.sendMessage("[Servux-paper] Player is not online: " + args[1]);
+                return;
+            }
+        } else if (sender instanceof Player player) {
+            target = player;
+        } else {
+            sender.sendMessage("[Servux-paper] Console usage: /servuxpaper resend <player>");
+            return;
+        }
+
+        if (!isEnabledFor(target)) {
+            sender.sendMessage("[Servux-paper] Target world is disabled by enabled-worlds.");
+            return;
+        }
+
+        sendMetadata(target, "manual command");
+        sender.sendMessage("[Servux-paper] Metadata resent to " + target.getName() + ".");
+    }
+
+    private void registerPacketListener() {
+        if (protocolManager == null) {
+            return;
+        }
+
+        protocolManager.removePacketListeners(this);
+        protocolManager.addPacketListener(new PacketAdapter(this, packetListenerPriority,
+                PacketType.Play.Client.USE_ITEM_ON) {
+            @Override
+            public void onPacketReceiving(PacketEvent event) {
+                handleUseItemOn(event);
+            }
+        });
+    }
+
+    private ListenerPriority parsePacketListenerPriority(String rawValue) {
+        if (rawValue == null || rawValue.isBlank()) {
+            return ListenerPriority.LOWEST;
+        }
+
+        try {
+            return ListenerPriority.valueOf(rawValue.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            getLogger().warning("Invalid packet-listener-priority '" + rawValue + "', using LOWEST.");
+            return ListenerPriority.LOWEST;
+        }
     }
 
     @EventHandler
@@ -113,8 +234,13 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
             return;
         }
 
-        player.getScheduler().runDelayed(this, task -> sendMetadata(player, "join"),
-                null, joinMetadataDelayTicks);
+        for (int attempt = 0; attempt < joinMetadataResendCount; attempt++) {
+            int attemptNumber = attempt + 1;
+            long delay = (long) joinMetadataDelayTicks + (long) attempt * joinMetadataResendIntervalTicks;
+            player.getScheduler().runDelayed(this,
+                    task -> sendMetadata(player, "join " + attemptNumber + "/" + joinMetadataResendCount),
+                    null, delay);
+        }
     }
 
     @EventHandler
@@ -130,18 +256,13 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
         }
 
         try {
-            int packetType = ServuxLitematicsPayload.readPacketType(message);
+            ServuxLitematicsPayload.IncomingPacket packet = ServuxLitematicsPayload.readPacket(message);
+            int packetType = packet.type();
             if (packetType == ServuxLitematicsPayload.PACKET_C2S_METADATA_REQUEST) {
-                metadataRequests.incrementAndGet();
+                metadataRequests.increment();
                 sendMetadata(player, "metadata request");
-            } else if (packetType == ServuxLitematicsPayload.PACKET_C2S_BLOCK_ENTITY_REQUEST
-                    || packetType == ServuxLitematicsPayload.PACKET_C2S_ENTITY_REQUEST
-                    || packetType == ServuxLitematicsPayload.PACKET_C2S_BULK_ENTITY_NBT_REQUEST
-                    || packetType == ServuxLitematicsPayload.PACKET_C2S_NBT_RESPONSE_DATA) {
-                debug("Received unsupported servux:litematics packet type=" + packetType
-                        + " from " + player.getName() + " length=" + message.length);
             } else {
-                debug("Received unknown servux:litematics packet type=" + packetType
+                debug("Received unsupported servux:litematics packet type=" + packetType
                         + " from " + player.getName() + " length=" + message.length);
             }
         } catch (RuntimeException ex) {
@@ -151,7 +272,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockPlace(BlockPlaceEvent event) {
-        blockPlaceEvents.incrementAndGet();
+        blockPlaceEvents.increment();
         Player player = event.getPlayer();
         if (!easyPlaceV3Enabled || !applyBlockState || !isEnabledFor(player)) {
             return;
@@ -183,7 +304,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
     }
 
     private void handleUseItemOn(PacketEvent event) {
-        useItemOnPackets.incrementAndGet();
+        useItemOnPackets.increment();
         Player player = event.getPlayer();
         if (!easyPlaceV3Enabled || !isEnabledFor(player)) {
             pendingPlacements.remove(player.getUniqueId());
@@ -211,7 +332,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
                 return;
             }
 
-            encodedPackets.incrementAndGet();
+            encodedPackets.increment();
             BlockPosition expectedPlacedBlock = offset(clickedBlock, hit.getDirection());
             pendingPlacements.put(player.getUniqueId(),
                     new ServuxPlacementPacket(player.getWorld().getUID(), clickedBlock, expectedPlacedBlock,
@@ -237,7 +358,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
         try {
             byte[] payload = ServuxLitematicsPayload.metadataResponse("PaperServuxCompat-" + getDescription().getVersion());
             player.sendPluginMessage(this, ServuxLitematicsPayload.CHANNEL, payload);
-            metadataSent.incrementAndGet();
+            metadataSent.increment();
             debug("Sent servux:litematics metadata to " + player.getName()
                     + " reason=" + reason + " length=" + payload.length);
         } catch (IOException | RuntimeException ex) {
@@ -260,7 +381,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
 
         boolean changed = ServuxV3PlacementApplier.apply(placed, packet.protocolValue(), getLogger(), debug);
         if (changed) {
-            appliedPlacements.incrementAndGet();
+            appliedPlacements.increment();
         }
         debug("Applied v3 protocol=" + packet.protocolValue() + " changed=" + changed
                 + " block=" + placed.getType() + " at " + placed.getLocation());
@@ -299,7 +420,11 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
         };
     }
 
-    private void debug(String message) {
+    boolean isDebugEnabled() {
+        return debug;
+    }
+
+    void debug(String message) {
         if (debug) {
             getLogger().info("[debug] " + message);
         }
@@ -316,6 +441,51 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
             lastPlainPacketLog.put(player.getUniqueId(), now);
             debug("Received normal USE_ITEM_ON from " + player.getName()
                     + " relativeX=" + relativeX + " (not Servux v3 encoded)");
+        }
+    }
+
+    private void restartMaintenanceExecutor() {
+        stopMaintenanceExecutor();
+        if (!asyncMaintenanceEnabled) {
+            return;
+        }
+
+        ThreadFactory factory = runnable -> {
+            Thread thread = new Thread(runnable, "PaperServuxCompat-maintenance");
+            thread.setDaemon(true);
+            return thread;
+        };
+        maintenanceExecutor = Executors.newSingleThreadScheduledExecutor(factory);
+        maintenanceExecutor.scheduleWithFixedDelay(this::runAsyncMaintenance,
+                asyncMaintenanceIntervalMillis,
+                asyncMaintenanceIntervalMillis,
+                TimeUnit.MILLISECONDS);
+    }
+
+    private void stopMaintenanceExecutor() {
+        ScheduledExecutorService executor = maintenanceExecutor;
+        maintenanceExecutor = null;
+        if (executor != null) {
+            executor.shutdownNow();
+        }
+    }
+
+    private void runAsyncMaintenance() {
+        try {
+            long now = System.currentTimeMillis();
+            long maxAge = packetMaxAgeMillis;
+            pendingPlacements.entrySet().removeIf(entry -> {
+                boolean expired = entry.getValue().isOlderThanMillis(now, maxAge);
+                if (expired) {
+                    expiredPlacements.increment();
+                }
+                return expired;
+            });
+
+            long debugCutoff = now - Math.max(10_000L, maxAge * 4L);
+            lastPlainPacketLog.entrySet().removeIf(entry -> entry.getValue() < debugCutoff);
+        } catch (RuntimeException ex) {
+            debug("Async maintenance failed: " + ex.getMessage());
         }
     }
 }

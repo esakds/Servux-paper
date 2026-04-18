@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Servux-paper"
+rootProject.name = "paper-servux-compat"

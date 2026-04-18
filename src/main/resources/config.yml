@@ -6,11 +6,20 @@ enabled-worlds: []
 # Expose the servux:litematics channel and reply to Litematica metadata requests.
 metadata-enabled: true
 
-# Send a metadata packet shortly after join so Litematica AUTO mode can detect Servux.
+# Send metadata packets after join so Litematica AUTO mode can detect Servux.
+# Several sends are intentional: some clients finish registering the receiver after login.
 join-metadata-delay-ticks: 40
+join-metadata-resend-count: 4
+join-metadata-resend-interval-ticks: 40
 
 # Enable Litematica Easy Place protocol v3 decoding.
 easy-place-v3-enabled: true
+
+# Packet listener priority for USE_ITEM_ON.
+# LOWEST is recommended so the plugin normalizes Litematica v3 coordinates
+# before most anti-cheat plugins inspect the packet.
+# Valid values: LOWEST, LOW, NORMAL, HIGH, HIGHEST, MONITOR
+packet-listener-priority: LOWEST
 
 # Keep encoded placement packets alive only briefly.
 packet-max-age-millis: 1200
@@ -30,3 +39,8 @@ require-same-material-before-apply: true
 
 # Set false if you only want Servux detection metadata and no v3 block-state correction.
 apply-block-state: true
+
+# Run a small async maintenance task that only touches plugin-owned concurrent maps.
+# It does not read or write Bukkit world/block/player state.
+async-maintenance-enabled: true
+async-maintenance-interval-millis: 1000
