@@ -44,7 +44,7 @@
 构建完成后，插件 jar 会生成在：
 
 ```text
-build/libs/paper-servux-compat-0.2.2.jar
+build/libs/paper-servux-compat-0.2.1.jar
 ```
 
 ## 安装
