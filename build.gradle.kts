@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "com.codexmc"
-version = "0.2.0"
+version = "0.2.2"
 
 java {
     toolchain {
@@ -25,7 +25,7 @@ tasks {
 
     processResources {
         filteringCharset = "UTF-8"
-        filesMatching(listOf("paper-plugin.yml", "plugin.yml")) {
+        filesMatching("plugin.yml") {
             expand("version" to project.version)
         }
     }

@@ -10,6 +10,7 @@ import com.comphenix.protocol.events.PacketEvent;
 import com.comphenix.protocol.wrappers.BlockPosition;
 import com.comphenix.protocol.wrappers.EnumWrappers;
 import com.comphenix.protocol.wrappers.MovingObjectPositionBlock;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.command.Command;
@@ -17,6 +18,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
+import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
@@ -34,11 +36,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 public final class PaperServuxCompatPlugin extends JavaPlugin implements Listener, PluginMessageListener {
     private final ConcurrentHashMap<UUID, ServuxPlacementPacket> pendingPlacements = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, Long> lastPlainPacketLog = new ConcurrentHashMap<>();
+    private final Set<ScheduledTask> scheduledTasks = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<UUID, Set<ScheduledTask>> scheduledTasksByPlayer = new ConcurrentHashMap<>();
     private final LongAdder metadataRequests = new LongAdder();
     private final LongAdder metadataSent = new LongAdder();
     private final LongAdder useItemOnPackets = new LongAdder();
@@ -65,25 +70,45 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
     private volatile boolean applyBlockState;
     private volatile boolean asyncMaintenanceEnabled;
     private volatile long asyncMaintenanceIntervalMillis;
+    private volatile boolean runtimeActive;
 
     @Override
     public void onEnable() {
+        runtimeActive = false;
         saveDefaultConfig();
         reloadLocalConfig();
-        restartMaintenanceExecutor();
 
-        getServer().getMessenger().registerOutgoingPluginChannel(this, ServuxLitematicsPayload.CHANNEL);
-        getServer().getMessenger().registerIncomingPluginChannel(this, ServuxLitematicsPayload.CHANNEL, this);
+        if (!getServer().getPluginManager().isPluginEnabled("ProtocolLib")) {
+            getLogger().severe("ProtocolLib is required before PaperServuxCompat can be enabled.");
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
 
         protocolManager = ProtocolLibrary.getProtocolManager();
+        unregisterProtocolListeners();
+        unregisterPluginMessagingChannels();
+        HandlerList.unregisterAll((org.bukkit.plugin.Plugin) this);
+
+        registerPluginMessagingChannels();
         registerPacketListener();
 
         getServer().getPluginManager().registerEvents(this, this);
+        restartMaintenanceExecutor();
+        runtimeActive = true;
+
+        if (isPlugManPresent()) {
+            getLogger().info("PlugMan/PlugManX detected; explicit reload cleanup is active.");
+        }
         getLogger().info("PaperServuxCompat enabled for servux:litematics metadata and Easy Place v3.");
     }
 
     @Override
     public void onDisable() {
+        runtimeActive = false;
+        unregisterProtocolListeners();
+        HandlerList.unregisterAll((org.bukkit.plugin.Plugin) this);
+        unregisterPluginMessagingChannels();
+        cancelTrackedTasks();
         stopMaintenanceExecutor();
         pendingPlacements.clear();
         lastPlainPacketLog.clear();
@@ -95,12 +120,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
                 + ", applied=" + appliedPlacements.sum()
                 + ", expired=" + expiredPlacements.sum());
 
-        if (protocolManager != null) {
-            protocolManager.removePacketListeners(this);
-        }
-
-        getServer().getMessenger().unregisterIncomingPluginChannel(this, ServuxLitematicsPayload.CHANNEL, this);
-        getServer().getMessenger().unregisterOutgoingPluginChannel(this, ServuxLitematicsPayload.CHANNEL);
+        protocolManager = null;
     }
 
     @Override
@@ -116,6 +136,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
             case "reload" -> {
                 reloadConfig();
                 reloadLocalConfig();
+                registerPluginMessagingChannels();
                 registerPacketListener();
                 restartMaintenanceExecutor();
                 sender.sendMessage("[Servux-paper] Config reloaded.");
@@ -162,7 +183,10 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
         sender.sendMessage("[Servux-paper] Async maintenance: enabled=" + asyncMaintenanceEnabled
                 + ", pending=" + pendingPlacements.size()
                 + ", expired=" + expiredPlacements.sum()
-                + ", blockDataCache=" + ServuxV3PlacementApplier.cacheSize());
+                + ", blockDataCache=" + ServuxV3PlacementApplier.cacheSize()
+                + ", trackedTasks=" + scheduledTasks.size());
+        sender.sendMessage("[Servux-paper] PlugMan compatibility: detected=" + isPlugManPresent()
+                + ", runtimeActive=" + runtimeActive);
 
         if (sender instanceof Player player) {
             sender.sendMessage("[Servux-paper] Current world enabled=" + isEnabledFor(player)
@@ -214,6 +238,23 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
         });
     }
 
+    private void registerPluginMessagingChannels() {
+        unregisterPluginMessagingChannels();
+        getServer().getMessenger().registerOutgoingPluginChannel(this, ServuxLitematicsPayload.CHANNEL);
+        getServer().getMessenger().registerIncomingPluginChannel(this, ServuxLitematicsPayload.CHANNEL, this);
+    }
+
+    private void unregisterPluginMessagingChannels() {
+        getServer().getMessenger().unregisterIncomingPluginChannel(this);
+        getServer().getMessenger().unregisterOutgoingPluginChannel(this);
+    }
+
+    private void unregisterProtocolListeners() {
+        if (protocolManager != null) {
+            protocolManager.removePacketListeners(this);
+        }
+    }
+
     private ListenerPriority parsePacketListenerPriority(String rawValue) {
         if (rawValue == null || rawValue.isBlank()) {
             return ListenerPriority.LOWEST;
@@ -230,28 +271,31 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        if (!metadataEnabled || !isEnabledFor(player)) {
+        if (!runtimeActive || !metadataEnabled || !isEnabledFor(player)) {
             return;
         }
 
         for (int attempt = 0; attempt < joinMetadataResendCount; attempt++) {
             int attemptNumber = attempt + 1;
             long delay = (long) joinMetadataDelayTicks + (long) attempt * joinMetadataResendIntervalTicks;
-            player.getScheduler().runDelayed(this,
-                    task -> sendMetadata(player, "join " + attemptNumber + "/" + joinMetadataResendCount),
-                    null, delay);
+            schedulePlayerTask(player,
+                    () -> sendMetadata(player, "join " + attemptNumber + "/" + joinMetadataResendCount),
+                    delay);
         }
     }
 
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
-        pendingPlacements.remove(event.getPlayer().getUniqueId());
-        lastPlainPacketLog.remove(event.getPlayer().getUniqueId());
+        UUID playerId = event.getPlayer().getUniqueId();
+        pendingPlacements.remove(playerId);
+        lastPlainPacketLog.remove(playerId);
+        cancelPlayerTasks(playerId);
     }
 
     @Override
     public void onPluginMessageReceived(String channel, Player player, byte[] message) {
-        if (!ServuxLitematicsPayload.CHANNEL.equals(channel) || !metadataEnabled || !isEnabledFor(player)) {
+        if (!runtimeActive || !ServuxLitematicsPayload.CHANNEL.equals(channel)
+                || !metadataEnabled || !isEnabledFor(player)) {
             return;
         }
 
@@ -272,6 +316,10 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockPlace(BlockPlaceEvent event) {
+        if (!runtimeActive) {
+            return;
+        }
+
         blockPlaceEvents.increment();
         Player player = event.getPlayer();
         if (!easyPlaceV3Enabled || !applyBlockState || !isEnabledFor(player)) {
@@ -294,9 +342,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
 
         Material placedType = placed.getType();
         if (applyDelayTicks > 0L) {
-            player.getScheduler().runDelayed(this,
-                    task -> applyPlacementState(player, placed, placedType, packet),
-                    null, applyDelayTicks);
+            schedulePlayerTask(player, () -> applyPlacementState(player, placed, placedType, packet), applyDelayTicks);
             return;
         }
 
@@ -304,6 +350,10 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
     }
 
     private void handleUseItemOn(PacketEvent event) {
+        if (!runtimeActive) {
+            return;
+        }
+
         useItemOnPackets.increment();
         Player player = event.getPlayer();
         if (!easyPlaceV3Enabled || !isEnabledFor(player)) {
@@ -355,6 +405,10 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
     }
 
     private void sendMetadata(Player player, String reason) {
+        if (!runtimeActive || !player.isOnline()) {
+            return;
+        }
+
         try {
             byte[] payload = ServuxLitematicsPayload.metadataResponse("PaperServuxCompat-" + getDescription().getVersion());
             player.sendPluginMessage(this, ServuxLitematicsPayload.CHANNEL, payload);
@@ -367,6 +421,10 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
     }
 
     private void applyPlacementState(Player player, Block placed, Material originalType, ServuxPlacementPacket packet) {
+        if (!runtimeActive || !player.isOnline()) {
+            return;
+        }
+
         if (!placed.getWorld().getUID().equals(player.getWorld().getUID())) {
             debug("Skipping delayed v3 apply because player changed world: player=" + player.getName());
             return;
@@ -442,6 +500,89 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
             debug("Received normal USE_ITEM_ON from " + player.getName()
                     + " relativeX=" + relativeX + " (not Servux v3 encoded)");
         }
+    }
+
+    private void schedulePlayerTask(Player player, Runnable action, long delayTicks) {
+        UUID playerId = player.getUniqueId();
+        AtomicReference<ScheduledTask> taskReference = new AtomicReference<>();
+        Runnable retired = () -> untrackScheduledTask(playerId, taskReference.get());
+        ScheduledTask scheduledTask = player.getScheduler().runDelayed(this, task -> {
+            untrackScheduledTask(playerId, task);
+            if (!runtimeActive || !player.isOnline()) {
+                return;
+            }
+            action.run();
+        }, retired, Math.max(1L, delayTicks));
+
+        taskReference.set(scheduledTask);
+        trackScheduledTask(playerId, scheduledTask);
+        if (scheduledTask.isCancelled()) {
+            untrackScheduledTask(playerId, scheduledTask);
+        }
+    }
+
+    private void trackScheduledTask(UUID playerId, ScheduledTask task) {
+        if (task == null) {
+            return;
+        }
+
+        scheduledTasks.add(task);
+        scheduledTasksByPlayer.computeIfAbsent(playerId, ignored -> ConcurrentHashMap.newKeySet()).add(task);
+    }
+
+    private void untrackScheduledTask(UUID playerId, ScheduledTask task) {
+        if (task == null) {
+            return;
+        }
+
+        scheduledTasks.remove(task);
+        Set<ScheduledTask> playerTasks = scheduledTasksByPlayer.get(playerId);
+        if (playerTasks != null) {
+            playerTasks.remove(task);
+            if (playerTasks.isEmpty()) {
+                scheduledTasksByPlayer.remove(playerId, playerTasks);
+            }
+        }
+    }
+
+    private void cancelPlayerTasks(UUID playerId) {
+        Set<ScheduledTask> playerTasks = scheduledTasksByPlayer.remove(playerId);
+        if (playerTasks == null) {
+            return;
+        }
+
+        for (ScheduledTask task : Set.copyOf(playerTasks)) {
+            scheduledTasks.remove(task);
+            cancelScheduledTask(task);
+        }
+        playerTasks.clear();
+    }
+
+    private void cancelTrackedTasks() {
+        for (ScheduledTask task : Set.copyOf(scheduledTasks)) {
+            cancelScheduledTask(task);
+        }
+        scheduledTasks.clear();
+        scheduledTasksByPlayer.clear();
+
+        try {
+            getServer().getScheduler().cancelTasks(this);
+        } catch (RuntimeException ex) {
+            debug("Could not cancel legacy scheduler tasks during unload: " + ex.getMessage());
+        }
+    }
+
+    private void cancelScheduledTask(ScheduledTask task) {
+        try {
+            task.cancel();
+        } catch (RuntimeException ex) {
+            debug("Could not cancel scheduled task during unload: " + ex.getMessage());
+        }
+    }
+
+    private boolean isPlugManPresent() {
+        return getServer().getPluginManager().getPlugin("PlugMan") != null
+                || getServer().getPluginManager().getPlugin("PlugManX") != null;
     }
 
     private void restartMaintenanceExecutor() {

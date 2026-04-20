@@ -12,6 +12,7 @@
 - 兼容 v3 直接点击目标可替换方块位的放置方式。
 - 提供 `/servuxpaper status` 和 `/servuxpaper resend` 用于确认握手与 v3 放置包状态。
 - 使用并发计数器、异步维护线程和线程安全方块属性缓存，降低大量玩家同时放置时的锁竞争与重复解析开销。
+- 支持 PlugMan / PlugManX 热卸载和重载时的显式清理。
 
 当前不实现：
 
@@ -43,7 +44,7 @@
 构建完成后，插件 jar 会生成在：
 
 ```text
-build/libs/paper-servux-compat-0.2.0.jar
+build/libs/paper-servux-compat-0.2.2.jar
 ```
 
 ## 安装
@@ -109,7 +110,7 @@ OP 可执行：
 ```text
 metadata: sent / requests
 Easy Place v3: encoded_v3 / applied
-Async maintenance: pending / expired / blockDataCache
+Async maintenance: pending / expired / blockDataCache / trackedTasks
 ```
 
 如果 `encoded_v3` 在轻松放置时增加，说明客户端正在发送 v3 放置包。如果 metadata 一直不被客户端识别，可以执行：
@@ -117,6 +118,18 @@ Async maintenance: pending / expired / blockDataCache
 ```text
 /servuxpaper resend
 ```
+
+## PlugMan / PlugManX
+
+插件使用 Bukkit 插件加载形式，避免 PlugManX 无法管理 Paper plugin 的限制。可以通过 PlugMan / PlugManX 执行 unload、load 或 reload。卸载时会主动清理：
+
+- ProtocolLib 包监听器。
+- `servux:litematics` 插件消息通道。
+- Bukkit 事件监听器。
+- 玩家调度器里的延迟任务。
+- 异步维护线程和运行时缓存。
+
+只重载本插件时可以使用 PlugMan。若同时更新 Paper、Lophine、ProtocolLib 或大量核心插件，仍建议完整重启服务器。
 
 ## Lophine / Folia
 
