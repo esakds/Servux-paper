@@ -44,7 +44,7 @@
 构建完成后，插件 jar 会生成在：
 
 ```text
-build/libs/paper-servux-compat-0.2.1.jar
+build/libs/paper-servux-compat-0.2.2.jar
 ```
 
 ## 安装
@@ -74,7 +74,8 @@ join-metadata-resend-count: 4
 join-metadata-resend-interval-ticks: 40
 easy-place-v3-enabled: true
 packet-listener-priority: LOWEST
-packet-max-age-millis: 1200
+packet-max-age-millis: 2500
+max-pending-placements-per-player: 32
 strict-placement-match: true
 apply-delay-ticks: 1
 require-same-material-before-apply: true
@@ -110,7 +111,7 @@ OP 可执行：
 ```text
 metadata: sent / requests
 Easy Place v3: encoded_v3 / applied
-Async maintenance: pending / expired / blockDataCache / trackedTasks
+Async maintenance: pendingPlayers / pendingPackets / expired / queueDrops / queueLimit / blockDataCache / trackedTasks
 ```
 
 如果 `encoded_v3` 在轻松放置时增加，说明客户端正在发送 v3 放置包。如果 metadata 一直不被客户端识别，可以执行：
@@ -118,6 +119,16 @@ Async maintenance: pending / expired / blockDataCache / trackedTasks
 ```text
 /servuxpaper resend
 ```
+
+如果高延迟或高速连放时仍偶发错位，优先调这几个值：
+
+```yaml
+packet-max-age-millis: 3000
+max-pending-placements-per-player: 48
+apply-delay-ticks: 2
+```
+
+其中 `max-pending-placements-per-player` 用来避免连续快速放置时，后一个 v3 包覆盖前一个待处理包。
 
 ## PlugMan / PlugManX
 

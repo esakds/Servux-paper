@@ -21,8 +21,12 @@ easy-place-v3-enabled: true
 # Valid values: LOWEST, LOW, NORMAL, HIGH, HIGHEST, MONITOR
 packet-listener-priority: LOWEST
 
-# Keep encoded placement packets alive only briefly.
-packet-max-age-millis: 1200
+# Keep encoded placement packets alive long enough for moderate lag spikes.
+packet-max-age-millis: 2500
+
+# Keep a short FIFO queue per player so very fast Easy Place bursts do not overwrite
+# the previous pending packet before BlockPlaceEvent arrives.
+max-pending-placements-per-player: 32
 
 # Reject obviously invalid encoded placement values.
 max-protocol-value: 1048575

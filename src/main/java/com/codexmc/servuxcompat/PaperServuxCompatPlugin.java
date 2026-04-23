@@ -32,6 +32,7 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
@@ -40,7 +41,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 public final class PaperServuxCompatPlugin extends JavaPlugin implements Listener, PluginMessageListener {
-    private final ConcurrentHashMap<UUID, ServuxPlacementPacket> pendingPlacements = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, ConcurrentLinkedDeque<ServuxPlacementPacket>> pendingPlacements =
+            new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, Long> lastPlainPacketLog = new ConcurrentHashMap<>();
     private final Set<ScheduledTask> scheduledTasks = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<UUID, Set<ScheduledTask>> scheduledTasksByPlayer = new ConcurrentHashMap<>();
@@ -51,6 +53,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
     private final LongAdder blockPlaceEvents = new LongAdder();
     private final LongAdder appliedPlacements = new LongAdder();
     private final LongAdder expiredPlacements = new LongAdder();
+    private final LongAdder queueOverflowDrops = new LongAdder();
 
     private ProtocolManager protocolManager;
     private ScheduledExecutorService maintenanceExecutor;
@@ -63,6 +66,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
     private volatile boolean easyPlaceV3Enabled;
     private volatile ListenerPriority packetListenerPriority = ListenerPriority.LOWEST;
     private volatile long packetMaxAgeMillis;
+    private volatile int maxPendingPlacementsPerPlayer;
     private volatile int maxProtocolValue;
     private volatile boolean strictPlacementMatch;
     private volatile long applyDelayTicks;
@@ -118,7 +122,8 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
                 + ", encoded_v3=" + encodedPackets.sum()
                 + ", block_place=" + blockPlaceEvents.sum()
                 + ", applied=" + appliedPlacements.sum()
-                + ", expired=" + expiredPlacements.sum());
+                + ", expired=" + expiredPlacements.sum()
+                + ", queue_overflow_drops=" + queueOverflowDrops.sum());
 
         protocolManager = null;
     }
@@ -157,7 +162,9 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
         easyPlaceV3Enabled = getConfig().getBoolean("easy-place-v3-enabled", true);
         packetListenerPriority = parsePacketListenerPriority(
                 getConfig().getString("packet-listener-priority", "LOWEST"));
-        packetMaxAgeMillis = Math.max(100L, getConfig().getLong("packet-max-age-millis", 1_200L));
+        packetMaxAgeMillis = Math.max(250L, getConfig().getLong("packet-max-age-millis", 2_500L));
+        maxPendingPlacementsPerPlayer = Math.max(4,
+                getConfig().getInt("max-pending-placements-per-player", 32));
         maxProtocolValue = Math.max(15, getConfig().getInt("max-protocol-value", 1_048_575));
         strictPlacementMatch = getConfig().getBoolean("strict-placement-match", true);
         applyDelayTicks = Math.max(0L, getConfig().getLong("apply-delay-ticks", 1L));
@@ -181,8 +188,11 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
                 + ", block_place=" + blockPlaceEvents.sum()
                 + ", applied=" + appliedPlacements.sum());
         sender.sendMessage("[Servux-paper] Async maintenance: enabled=" + asyncMaintenanceEnabled
-                + ", pending=" + pendingPlacements.size()
+                + ", pendingPlayers=" + pendingPlacements.size()
+                + ", pendingPackets=" + totalPendingPlacements()
                 + ", expired=" + expiredPlacements.sum()
+                + ", queueDrops=" + queueOverflowDrops.sum()
+                + ", queueLimit=" + maxPendingPlacementsPerPlayer
                 + ", blockDataCache=" + ServuxV3PlacementApplier.cacheSize()
                 + ", trackedTasks=" + scheduledTasks.size());
         sender.sendMessage("[Servux-paper] PlugMan compatibility: detected=" + isPlugManPresent()
@@ -326,7 +336,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
             return;
         }
 
-        ServuxPlacementPacket packet = pendingPlacements.remove(player.getUniqueId());
+        ServuxPlacementPacket packet = findMatchingPlacement(player.getUniqueId(), event.getBlock(), event.getBlockAgainst());
         if (packet == null || packet.isOlderThanMillis(packetMaxAgeMillis)) {
             debug("BlockPlace without pending v3 packet: player=" + player.getName()
                     + " block=" + event.getBlock().getType() + " at " + event.getBlock().getLocation());
@@ -357,7 +367,6 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
         useItemOnPackets.increment();
         Player player = event.getPlayer();
         if (!easyPlaceV3Enabled || !isEnabledFor(player)) {
-            pendingPlacements.remove(player.getUniqueId());
             return;
         }
 
@@ -369,14 +378,12 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
             double relativeX = hitVector.getX() - clickedBlock.getX();
 
             if (relativeX < 2.0D) {
-                pendingPlacements.remove(player.getUniqueId());
                 debugPlainPacket(player, relativeX);
                 return;
             }
 
             int protocolValue = ((int) Math.floor(relativeX)) - 2;
             if (protocolValue < 0 || protocolValue > maxProtocolValue) {
-                pendingPlacements.remove(player.getUniqueId());
                 debug("Ignoring v3 packet outside configured range: player=" + player.getName()
                         + " protocol=" + protocolValue + " relativeX=" + relativeX);
                 return;
@@ -384,7 +391,7 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
 
             encodedPackets.increment();
             BlockPosition expectedPlacedBlock = offset(clickedBlock, hit.getDirection());
-            pendingPlacements.put(player.getUniqueId(),
+            queuePlacement(player.getUniqueId(),
                     new ServuxPlacementPacket(player.getWorld().getUID(), clickedBlock, expectedPlacedBlock,
                             hit.getDirection(), protocolValue));
 
@@ -395,7 +402,6 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
             debug("Decoded v3 protocol=" + protocolValue + " player=" + player.getName()
                     + " clicked=" + clickedBlock + " direction=" + hit.getDirection());
         } catch (RuntimeException ex) {
-            pendingPlacements.remove(player.getUniqueId());
             getLogger().warning("Failed to process USE_ITEM_ON packet for " + player.getName()
                     + ": " + ex.getMessage());
             if (debug) {
@@ -500,6 +506,71 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
             debug("Received normal USE_ITEM_ON from " + player.getName()
                     + " relativeX=" + relativeX + " (not Servux v3 encoded)");
         }
+    }
+
+    private void queuePlacement(UUID playerId, ServuxPlacementPacket packet) {
+        ConcurrentLinkedDeque<ServuxPlacementPacket> queue = pendingPlacements.computeIfAbsent(
+                playerId, ignored -> new ConcurrentLinkedDeque<>());
+        queue.addLast(packet);
+
+        while (queue.size() > maxPendingPlacementsPerPlayer) {
+            ServuxPlacementPacket dropped = queue.pollFirst();
+            if (dropped == null) {
+                break;
+            }
+            queueOverflowDrops.increment();
+            debug("Dropped oldest queued v3 packet because player queue exceeded "
+                    + maxPendingPlacementsPerPlayer + " packets.");
+        }
+    }
+
+    private ServuxPlacementPacket findMatchingPlacement(UUID playerId, Block placed, Block against) {
+        ConcurrentLinkedDeque<ServuxPlacementPacket> queue = pendingPlacements.get(playerId);
+        if (queue == null) {
+            return null;
+        }
+
+        long now = System.currentTimeMillis();
+        trimExpiredPlacements(playerId, queue, now);
+        for (ServuxPlacementPacket packet : queue) {
+            if (isSamePlacement(packet, placed, against) && queue.remove(packet)) {
+                removeQueueIfEmpty(playerId, queue);
+                return packet;
+            }
+        }
+
+        removeQueueIfEmpty(playerId, queue);
+        return null;
+    }
+
+    private void trimExpiredPlacements(UUID playerId, ConcurrentLinkedDeque<ServuxPlacementPacket> queue, long now) {
+        while (true) {
+            ServuxPlacementPacket oldest = queue.peekFirst();
+            if (oldest == null || !oldest.isOlderThanMillis(now, packetMaxAgeMillis)) {
+                break;
+            }
+
+            if (queue.pollFirst() == null) {
+                break;
+            }
+            expiredPlacements.increment();
+        }
+
+        removeQueueIfEmpty(playerId, queue);
+    }
+
+    private void removeQueueIfEmpty(UUID playerId, ConcurrentLinkedDeque<ServuxPlacementPacket> queue) {
+        if (queue.isEmpty()) {
+            pendingPlacements.remove(playerId, queue);
+        }
+    }
+
+    private long totalPendingPlacements() {
+        long total = 0L;
+        for (ConcurrentLinkedDeque<ServuxPlacementPacket> queue : pendingPlacements.values()) {
+            total += queue.size();
+        }
+        return total;
     }
 
     private void schedulePlayerTask(Player player, Runnable action, long delayTicks) {
@@ -614,16 +685,9 @@ public final class PaperServuxCompatPlugin extends JavaPlugin implements Listene
     private void runAsyncMaintenance() {
         try {
             long now = System.currentTimeMillis();
-            long maxAge = packetMaxAgeMillis;
-            pendingPlacements.entrySet().removeIf(entry -> {
-                boolean expired = entry.getValue().isOlderThanMillis(now, maxAge);
-                if (expired) {
-                    expiredPlacements.increment();
-                }
-                return expired;
-            });
+            pendingPlacements.forEach((playerId, queue) -> trimExpiredPlacements(playerId, queue, now));
 
-            long debugCutoff = now - Math.max(10_000L, maxAge * 4L);
+            long debugCutoff = now - Math.max(10_000L, packetMaxAgeMillis * 4L);
             lastPlainPacketLog.entrySet().removeIf(entry -> entry.getValue() < debugCutoff);
         } catch (RuntimeException ex) {
             debug("Async maintenance failed: " + ex.getMessage());
