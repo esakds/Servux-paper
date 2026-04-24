@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "com.codexmc"
-version = "0.2.2"
+version = "0.2.3"
 
 java {
     toolchain {
@@ -12,7 +12,7 @@ java {
 }
 
 dependencies {
-    compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
+    compileOnly("io.papermc.paper:paper-api:1.21-R0.1-SNAPSHOT")
     compileOnly("net.dmulloy2:ProtocolLib:5.4.0")
     compileOnly("io.netty:netty-buffer:4.1.118.Final")
 }

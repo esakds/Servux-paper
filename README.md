@@ -24,10 +24,14 @@
 
 ## 目标环境
 
-- 服务端：Lophine / Paper API `1.21.11`
+- 服务端：Lophine / Paper API `1.21.x`
 - Java：`21`
 - 运行依赖：`ProtocolLib 5.4.0`
-- 客户端：Minecraft `1.21.11` + Fabric + MaLiLib + Litematica
+- 客户端：Minecraft `1.21.x` + Fabric + MaLiLib + Litematica
+
+插件使用 `plugin.yml` 的 `api-version: "1.21"`，并改为以更早的
+`paper-api:1.21-R0.1-SNAPSHOT` 作为编译基线，目标覆盖整个 `1.21.x`
+小版本范围，而不是只针对 `1.21.11`。
 
 ## 前置插件
 
@@ -44,7 +48,7 @@
 构建完成后，插件 jar 会生成在：
 
 ```text
-build/libs/paper-servux-compat-0.2.2.jar
+build/libs/paper-servux-compat-0.2.3.jar
 ```
 
 ## 安装
