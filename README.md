@@ -1,6 +1,6 @@
 # Servux-paper
 
-这是一个 Paper / Lophine 服务端插件，用来给 Litematica 提供轻量级的 Servux metadata 握手和 Easy Place v3 轻松放置兼容。
+这是一个 Paper / Folia 服务端插件，用来给 Litematica 提供轻量级的 Servux metadata 握手和 Easy Place v3 轻松放置兼容。
 
 当前实现范围：
 
@@ -24,7 +24,7 @@
 
 ## 目标环境
 
-- 服务端：Lophine / Paper API `1.21.x`
+- 服务端：Paper / Folia API `1.21.x`
 - Java：`21`
 - 运行依赖：`ProtocolLib 5.4.0`
 - 客户端：Minecraft `1.21.x` + Fabric + MaLiLib + Litematica
@@ -144,11 +144,11 @@ apply-delay-ticks: 2
 - 玩家调度器里的延迟任务。
 - 异步维护线程和运行时缓存。
 
-只重载本插件时可以使用 PlugMan。若同时更新 Paper、Lophine、ProtocolLib 或大量核心插件，仍建议完整重启服务器。
+只重载本插件时可以使用 PlugMan。若同时更新 Paper、Folia、ProtocolLib 或大量核心插件，仍建议完整重启服务器。
 
-## Lophine / Folia
+## Folia
 
-插件声明 `folia-supported: true`，可以在 Lophine / Folia 类服务端加载。
+插件声明 `folia-supported: true`，可以在 Folia 类服务端加载。
 
 Easy Place v3 的单方块修正使用玩家调度器，适合只处理玩家放置后的单方块状态修正。
 
